@@ -7,7 +7,7 @@
 #include <sys/socket.h>
 #include <netdb.h>
 
-#define DEFAULT_DICT "test.txt"
+#define DEFAULT_DICT "dict.txt"
 #define DEFAULT_PORT 3667
 #define FMESSAGE "OK"
 #define NFMESSAGE "MISSPELLED"
@@ -19,7 +19,8 @@
 char **dict;
 int words_in_dict;
 int work_queue[MAX_REQUESTS];
-sem_t mutex, count, full;
+sem_t mutex, empty, full;
+int work_in_queue;
 
 /*INPUT: takes a string representing a dictionary filename
  *FUNCTION: reads the contents of a dictionary file into an array of strings;
@@ -60,7 +61,8 @@ void *thread_routine(void *arg) {
 	while (1) {
 		char *message = malloc(MAX_WORD_SIZE);
 		/*wait for work*/
-		sem_wait(&count);
+		if (work_in_queue == 0) 
+			sem_wait(&empty);
 		/*acquire lock before entering c-s*/
 		sem_wait(&mutex);
 		/*get first piece of work off of queue*/
@@ -69,12 +71,11 @@ void *thread_routine(void *arg) {
 				clientfd = work_queue[i];
 				/*zero out the work queue*/
 				work_queue[i] = 0;
+				work_in_queue--;
+				/*alert main thread that previously full work queue now has an empty slot*/
+				if (work_in_queue == (MAX_REQUESTS - 1))
+					sem_post(&full);
 				break;
-			}
-			/*alert main thread that previously full work queue now has an empty slot*/
-			sem_getvalue(&count, &value);
-			if (value == MAX_REQUESTS - 1) {
-				sem_post(&full);
 			}
 		}
 		/*release lock*/
@@ -108,6 +109,7 @@ void main(int argc, char **argv) {
 	int listenfd = 0, workfd = 0;
 	struct sockaddr_in server;
 	int i, value;
+	work_in_queue = 0;
 	
 	/*handles cmd line input*/
 	if (argc > 1) {
@@ -138,7 +140,7 @@ void main(int argc, char **argv) {
 	
 	/*initialize semaphores*/
 	sem_init(&mutex, 0, 1);
-	sem_init(&count, 0, 0);
+	sem_init(&empty, 0, 0);
 	sem_init(&full, 0, 0);
 	
 	/*create worker pool*/
@@ -149,22 +151,23 @@ void main(int argc, char **argv) {
 	/*main thread loop*/
 	while (1) {
 		workfd = accept(listenfd, NULL, NULL);
-		/*acquire lock before entering c-s*/
-		sem_wait(&mutex);
 		/*make sure that there is room in queue*/
-		sem_getvalue(&full, &value);
-		if (value == MAX_REQUESTS) {
+		if (work_in_queue == MAX_REQUESTS) {
 			sem_wait(&full);
 		}
+		/*acquire lock before entering c-s*/
+		sem_wait(&mutex);
 		/*place client fd in first empty slot in queue*/
 		for (i = 0; i < MAX_REQUESTS; i++) {
 			if (work_queue[i] == 0) {
 				work_queue[i] = workfd;
+				work_in_queue++;
+				sem_post(&empty);
 				break;
 			}
 		}
-		/*release lock; alert waiters of work in queue*/
-		sem_post(&count);
+		/*release lock*/
 		sem_post(&mutex);
 	}
 }
+
